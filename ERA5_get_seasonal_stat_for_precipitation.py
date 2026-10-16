@@ -1,0 +1,156 @@
+"""
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
+#                               <<< SOME NOTES >>>                              #
+#                                                                               #
+#>>> This script reads output from 'ERA5_data_pickle.py' and gets the average   #
+#    of total precipiation data within the shapefiles. The values will be       #
+#    calculated for the pre- and post-fire periods, separately. One of the      #
+#    output CSV files includes daily values and the other CSV file gives the    #  
+#    seasonal summation of total precipitation.                                 #
+#                                                                               #
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
+
+@author : Reza Rezaei
+email   : rezarezaei2008@gmail.com
+version : 1.0
+year    : 2025
+"""
+
+import os
+import sys
+import csv
+import pprint
+import datetime
+import numpy as np
+import pandas as pd
+import _pickle as cPickle
+import geopandas as gpd
+from shapely.geometry import mapping
+from rasterio.features import rasterize
+from rasterio.transform import from_origin
+
+class ReadPKL:
+    def __init__(self, input_pkl, shapefile, output_dir, pre_fire_st_end_date, 
+                 post_fire_st_end_date):
+        self.pkl = input_pkl
+        self.shape = shapefile
+        self.outdir = output_dir
+        self.pre_st_ed = pre_fire_st_end_date
+        self.post_st_ed = post_fire_st_end_date
+                                                          
+    def cropDataWithShapefile(self, data, lat, lon, shapefile):
+        gdf = gpd.read_file(shapefile)
+        geometries = [mapping(geom) for geom in gdf.geometry]
+        nrows, ncols = data.shape
+        res_y = abs(lat[1, 0] - lat[0, 0])
+        res_x = abs(lon[0, 1] - lon[0, 0])
+        transform = from_origin(lon[0, 0] - res_x / 2, 
+                                lat[0, 0] - res_y / 2,
+                                res_x, 
+                                res_y)
+
+        mask = rasterize(geometries, out_shape=(nrows, ncols), transform=transform,
+                         fill=0, all_touched=True, dtype=np.uint8)
+        cropped = np.where(mask == 1, data, np.nan)
+        
+        return cropped
+    
+    def getSeason(self, date):
+        year = date.year
+        if date >= pd.Timestamp(f"{year}-03-21") and date < pd.Timestamp(f"{year}-06-21"):
+            return "Spring"
+        elif date >= pd.Timestamp(f"{year}-06-21") and date < pd.Timestamp(f"{year}-09-23"):
+            return "Summer"
+        elif date >= pd.Timestamp(f"{year}-09-23") and date < pd.Timestamp(f"{year}-12-21"):
+            return "Autumn"
+        else:
+            return "Winter"
+        
+    def readPKL(self):
+        for area_name, shapefile in self.shape.items():
+            file_name = os.path.basename(self.pkl)
+            data_name = file_name[:-4].replace("_", " ")
+            timeseries_csv_name = f"{area_name}_average_of_{file_name[:-4]}.csv" 
+            
+            data_dict = {}
+            with open(self.pkl, "rb") as fp:
+                pkld_dt = cPickle.load(fp)
+                lat = pkld_dt["Lat"]
+                lon = pkld_dt["Lon"]
+                for year, year_dict in pkld_dt.items():
+                    if type(year_dict) == dict:
+                       for day, day_data in year_dict.items():
+                           cropped_data = self.cropDataWithShapefile(data=day_data, 
+                                                                     lat=lat, 
+                                                                     lon=lon, 
+                                                                     shapefile=shapefile)
+                           
+                           mean_val = np.nanmean(cropped_data)
+                           data_dict[day] = mean_val
+            #pprint.pprint(data_dict, sort_dicts=False)
+            
+            df = pd.DataFrame(list(data_dict.items()), columns=["Date", data_name])
+            df["Date"] = pd.to_datetime(df["Date"])
+            df = df.sort_values(by="Date")
+            df["year"] = df["Date"].dt.year   
+            
+            csv_filename = os.path.join(self.outdir, timeseries_csv_name)
+            df.to_csv(csv_filename, index=False)
+            df["Date"] = pd.to_datetime(df["Date"], format="mixed")
+            
+            pre_fire_st = datetime.datetime.strptime(self.pre_st_ed[0], "%Y-%m-%d")
+            pre_fire_ed = datetime.datetime.strptime(self.pre_st_ed[1], "%Y-%m-%d")
+            pre_fire_df = df[(df["Date"] >= pre_fire_st) & (df["Date"] <= pre_fire_ed)].copy()
+            
+            post_fire_st = datetime.datetime.strptime(self.post_st_ed[0], "%Y-%m-%d")
+            post_fire_ed = datetime.datetime.strptime(self.post_st_ed[1], "%Y-%m-%d")
+            post_fire_df = df[(df["Date"] >= post_fire_st) & (df["Date"] <= post_fire_ed)].copy()
+
+            pre_fire_df.loc[:, "season"] = pre_fire_df["Date"].apply(self.getSeason)
+            pre_fire_df.loc[(pre_fire_df["Date"].dt.month == 1) | (pre_fire_df["Date"].dt.month == 2), "year"] -= pre_fire_df["season"] == "Winter"
+            pre_fire_season_avg = pre_fire_df.groupby(["year", "season"])[data_name].sum().reset_index()
+            pre_fire_season_avg = pre_fire_season_avg.groupby("season")[data_name].mean().reset_index()
+            pre_fire_season_avg.rename(columns={data_name: "Pre-fire"}, inplace=True)
+
+            post_fire_df.loc[:, "season"] = post_fire_df["Date"].apply(self.getSeason)
+            post_fire_df.loc[(post_fire_df["Date"].dt.month == 1) | (post_fire_df["Date"].dt.month == 2), "year"] -= post_fire_df["season"] == "Winter"
+            post_fire_season_avg = post_fire_df.groupby(["year", "season"])[data_name].sum().reset_index()
+            post_fire_season_avg = post_fire_season_avg.groupby("season")[data_name].mean().reset_index()
+            post_fire_season_avg.rename(columns={data_name: "Post-fire"}, inplace=True)
+           
+            pre_fire_season_avg["Post-fire"] = post_fire_season_avg["Post-fire"].values
+            pre_fire_season_avg["Post - Pre"] = pre_fire_season_avg.loc[:, "Post-fire"] - \
+                pre_fire_season_avg.loc[:, "Pre-fire"]
+                
+            season_avg_csv_name = f"{area_name}_seasonal_average_{file_name[:-4]}.csv" 
+            avg_csv_filename = os.path.join(self.outdir, season_avg_csv_name)
+            pre_fire_season_avg.to_csv(avg_csv_filename, index=True)          
+            
+
+
+
+#===================================== RUN ====================================
+
+input_pkl = "E:/Data/ERA5/Total_Precipitation.pkl"
+
+shapefile = {"AD01":"E:/Data/Sentinel-2A/Shapefiles_Revised/Adana_revised/temporal_adana.shp",
+             "AD02":"E:/Data/Sentinel-2A/Shapefiles_Revised/Adana_revised/temporal_adana_2.shp",
+             "AD03":"E:/Data/Sentinel-2A/Shapefiles_Revised/Adana_revised/temporal_adana_3.shp",
+             "AN01":"E:/Data/Sentinel-2A/Shapefiles_Revised/Antalya_revised/area_01.shp",
+             "AN02":"E:/Data/Sentinel-2A/Shapefiles_Revised/Antalya_revised/area_02.shp",
+             "ME01":"E:/Data/Sentinel-2A/Shapefiles_Revised/Mersin_revised/mersin_area_01.shp",
+             "ME02":"E:/Data/Sentinel-2A/Shapefiles_Revised/Mersin_revised/mersin_area_02.shp",
+             "MU01":"E:/Data/Sentinel-2A/Shapefiles_Revised/Mugla_revised/area_1.shp",
+             "MU02":"E:/Data/Sentinel-2A/Shapefiles_Revised/Mugla_revised/area_2.shp",
+             "MU03":"E:/Data/Sentinel-2A/Shapefiles_Revised/Mugla_revised/area_3.shp",
+             "MU04":"E:/Data/Sentinel-2A/Shapefiles_Revised/Mugla_revised/area_4.shp"}
+
+output_dir="E:/Data/ERA5/out"
+
+ins = ReadPKL(input_pkl=input_pkl,        
+              shapefile=shapefile,
+              output_dir=output_dir,
+              pre_fire_st_end_date=["1990-01-01", "2021-02-28"],       
+              post_fire_st_end_date=["2021-09-01", "2026-07-31"]) 
+
+ins.readPKL()
