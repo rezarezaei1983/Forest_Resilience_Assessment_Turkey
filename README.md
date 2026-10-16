@@ -1,0 +1,1 @@
+These scripts were developed to perform data preprocessing and post-processing for my paper entitled “Short-Term Forest Resilience Dynamics Following the 2021 Mega-Fires in Turkey: Insights from Resilience Metrics and Interpretable Generalized Additive Models (GAMs).”  Each script is described at the beginning of its corresponding file.
